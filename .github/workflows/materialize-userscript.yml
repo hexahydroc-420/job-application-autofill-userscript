@@ -14,9 +14,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Extract public UserScript
         run: |
-          test -f public-payload.zip
+          cat payload.part-00 payload.part-01 payload.part-02 payload.part-03 > public-payload.zip
+          unzip -t public-payload.zip
           unzip -o public-payload.zip
-          rm public-payload.zip
+          rm public-payload.zip payload.part-00 payload.part-01 payload.part-02 payload.part-03
           rm .github/workflows/materialize-userscript.yml
       - name: Commit generated file
         run: |
