@@ -9,12 +9,12 @@ permissions:
 
 jobs:
   materialize:
-    if: ${{ hashFiles('public-payload.zip') != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Extract public UserScript
         run: |
+          test -f public-payload.zip
           unzip -o public-payload.zip
           rm public-payload.zip
           rm .github/workflows/materialize-userscript.yml
