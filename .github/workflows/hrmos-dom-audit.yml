@@ -1,0 +1,97 @@
+name: HRMOS DOM audit
+on:
+  push:
+    paths:
+      - '.github/workflows/hrmos-dom-audit.yml'
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect live HRMOS repeat controls
+        shell: bash
+        run: |
+          python -m pip install --quiet selenium
+          cat > /tmp/audit.py <<'PY'
+          import json, time
+          from selenium import webdriver
+          from selenium.webdriver.common.by import By
+          from selenium.webdriver.chrome.options import Options
+          from selenium.webdriver.support.ui import WebDriverWait
+          from selenium.webdriver.support import expected_conditions as EC
+
+          URL='https://hrmos.co/pages/mun/jobs/02_03/apply'
+          opt=Options()
+          opt.add_argument('--headless=new')
+          opt.add_argument('--no-sandbox')
+          opt.add_argument('--disable-dev-shm-usage')
+          opt.add_argument('--window-size=1440,2200')
+          d=webdriver.Chrome(options=opt)
+          try:
+              d.get(URL)
+              WebDriverWait(d,20).until(EC.presence_of_element_located((By.TAG_NAME,'body')))
+              time.sleep(3)
+              print('URL', d.current_url)
+              print('TITLE', d.title)
+              # All likely repeat/add controls, including non-button clickable containers.
+              js = r'''
+              const terms = /(職歴|学歴|資格).*(追加)|追加.*(職歴|学歴|資格)/;
+              const els = [...document.querySelectorAll('button,a,input,[role="button"],[tabindex],div,span')];
+              const out=[];
+              const seen=new Set();
+              for (const e of els) {
+                const text=(e.innerText||e.textContent||e.value||e.getAttribute('aria-label')||e.getAttribute('title')||'').replace(/\s+/g,' ').trim();
+                if (!text || !terms.test(text)) continue;
+                const key=e.tagName+'|'+text+'|'+(e.className||'');
+                if(seen.has(key)) continue; seen.add(key);
+                const cs=getComputedStyle(e);
+                out.push({tag:e.tagName,type:e.type||'',role:e.getAttribute('role'),tabindex:e.getAttribute('tabindex'),text:text.slice(0,160),class:String(e.className||'').slice(0,240),cursor:cs.cursor,onclick:!!e.onclick,outer:e.outerHTML.slice(0,1800)});
+              }
+              return out;
+              '''
+              rows=d.execute_script(js)
+              print('=== ADD CONTROL CANDIDATES ===')
+              print(json.dumps(rows,ensure_ascii=False,indent=2))
+
+              # Prefer exact/near exact work-history add control and click it.
+              click_js = r'''
+              const rx=/^\s*(?:\+\s*)?職歴を追加\s*$/;
+              const els=[...document.querySelectorAll('button,a,input,[role="button"],[tabindex],div,span')];
+              const scored=[];
+              for(const e of els){
+                const t=(e.innerText||e.textContent||e.value||e.getAttribute('aria-label')||'').replace(/\s+/g,' ').trim();
+                if(!rx.test(t)) continue;
+                const tag=e.tagName.toLowerCase(); const role=e.getAttribute('role');
+                let s=0; if(tag==='button')s+=100;if(tag==='a')s+=80;if(tag==='input')s+=90;if(role==='button')s+=95;if(e.tabIndex>=0)s+=30;if(getComputedStyle(e).cursor==='pointer')s+=20;
+                scored.push({e,s,t});
+              }
+              scored.sort((a,b)=>b.s-a.s);
+              if(!scored.length)return null;
+              const x=scored[0];
+              const before=document.querySelectorAll('input,select,textarea').length;
+              x.e.click();
+              return {tag:x.e.tagName,text:x.t,score:x.s,outer:x.e.outerHTML.slice(0,1800),before};
+              '''
+              clicked=d.execute_script(click_js)
+              print('=== CLICKED ===')
+              print(json.dumps(clicked,ensure_ascii=False,indent=2))
+              time.sleep(2)
+              post=d.execute_script(r'''
+              const fields=[...document.querySelectorAll('input,select,textarea')].filter(e=>{
+                const s=getComputedStyle(e);return s.display!=='none'&&s.visibility!=='hidden';
+              });
+              const items=fields.map(e=>{
+                const row=e.closest('tr');
+                const label=(row?.querySelector('th,td')?.innerText||e.closest('label')?.innerText||e.getAttribute('aria-label')||e.placeholder||'').replace(/\s+/g,' ').trim();
+                return {tag:e.tagName,type:e.type||'',name:e.name||'',placeholder:e.placeholder||'',label:label.slice(0,180),outer:e.outerHTML.slice(0,700)};
+              }).filter(x=>/(会社|職歴|部署|役職|職種|働き方|在籍|業務内容|勤務)/.test(x.label+' '+x.placeholder));
+              return {fieldCount:fields.length, workFields:items.slice(0,60)};
+              ''')
+              print('=== AFTER CLICK WORK FIELDS ===')
+              print(json.dumps(post,ensure_ascii=False,indent=2))
+          finally:
+              d.quit()
+          PY
+          python /tmp/audit.py
