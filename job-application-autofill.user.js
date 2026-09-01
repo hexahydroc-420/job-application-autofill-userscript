@@ -4,8 +4,8 @@
 // @homepageURL  https://github.com/hexahydroc-420/job-application-autofill-userscript
 // @updateURL    https://raw.githubusercontent.com/hexahydroc-420/job-application-autofill-userscript/main/job-application-autofill.user.js
 // @downloadURL  https://raw.githubusercontent.com/hexahydroc-420/job-application-autofill-userscript/main/job-application-autofill.user.js
-// @version      4.3.1
-// @description  複数プロフィールをGUIで管理し、学歴・職歴・資格・企業独自回答を並べ替え可能。HRMOS等の「職歴を追加」型の動的追加にも対応し、プルダウン・ラジオ・チェックボックス・複数選択も補助します。送信・同意・ファイル添付は自動化しません。
+// @version      4.3.2
+// @description  複数プロフィールをGUIで管理し、学歴・職歴・資格・企業独自回答を並べ替え可能。HRMOS等の「職歴を追加」型の動的追加に対応し、「必須項目のみ入力」も選択可能。プルダウン・ラジオ・チェックボックス・複数選択も補助します。送信・同意・ファイル添付は自動化しません。
 // @match        https://hrmos.co/pages/*/jobs/*/apply*
 // @match        https://boards.greenhouse.io/*
 // @match        https://job-boards.greenhouse.io/*
@@ -330,6 +330,62 @@
     };
   }
 
+  const REQUIRED_TOKEN_RX = /(?:^|[\s:：※*＊・\-／/（(])(?:必須|required|mandatory)(?:$|[\s:：※*＊・\-／/）)])/i;
+
+  function hasRequiredMarkerText(text) {
+    const t = clean(text);
+    return !!t && REQUIRED_TOKEN_RX.test(t);
+  }
+
+  function isRequiredControl(el) {
+    if (!el) return false;
+    try {
+      if (el.required === true) return true;
+      if (el.getAttribute?.('required') !== null) return true;
+      if (el.getAttribute?.('aria-required') === 'true') return true;
+      if (/^(true|required|1)$/i.test(clean(el.getAttribute?.('data-required')))) return true;
+      const ownClass = typeof el.className === 'string' ? el.className : '';
+      if (/(^|[\s_-])(?:required|mandatory|is-required|field-required)(?=$|[\s_-])/i.test(ownClass)) return true;
+    } catch (_) {}
+    const info = labelInfo(el);
+    for (const text of [info.rowLabel, info.label, info.aria, info.radioLabel]) {
+      if (hasRequiredMarkerText(text)) return true;
+    }
+    const container = info.container;
+    if (container) {
+      try {
+        if (container.getAttribute?.('aria-required') === 'true' || /^(true|required|1)$/i.test(clean(container.getAttribute?.('data-required')))) return true;
+        const cls = typeof container.className === 'string' ? container.className : '';
+        if (/(^|[\s_-])(?:required|mandatory|is-required|field-required)(?=$|[\s_-])/i.test(cls)) return true;
+        const marker = container.querySelector?.('[aria-required="true"],[data-required="true"],[data-required="required"],.required,.is-required,.field-required,[class*="mandatory"]');
+        if (marker && (marker === el || hasRequiredMarkerText(marker.innerText || marker.textContent || marker.getAttribute?.('aria-label') || '') || /required|mandatory/i.test(String(marker.className || '')))) return true;
+        const t = clean(container.innerText || container.textContent);
+        if (t && t.length <= 260 && hasRequiredMarkerText(t)) return true;
+      } catch (_) {}
+    }
+    for (let node = el.parentElement, depth = 0; node && depth < 6; node = node.parentElement, depth++) {
+      if (node === document.body || node === document.documentElement) break;
+      const text = clean(node.innerText || node.textContent);
+      if (!text || text.length > 340) continue;
+      let controls = [];
+      try { controls = [...node.querySelectorAll('input,select,textarea,[role="radio"],[role="checkbox"],[role="switch"],[role="option"]')]; } catch (_) {}
+      const nativeChoices = controls.length > 1 && controls.every(c =>
+        (c instanceof HTMLInputElement && ['radio', 'checkbox'].includes(c.type))
+        || ['radio', 'checkbox', 'switch', 'option'].includes(norm(c.getAttribute?.('role')))
+      );
+      const dateSelectGroup = controls.length > 1 && controls.length <= 4 && controls.every(c => c instanceof HTMLSelectElement && !!datePartKind(c));
+      const cohesive = controls.length === 1 || nativeChoices || dateSelectGroup;
+      if (!cohesive) continue;
+      if (node.getAttribute?.('aria-required') === 'true' || /^(true|required|1)$/i.test(clean(node.getAttribute?.('data-required')))) return true;
+      if (hasRequiredMarkerText(text)) return true;
+    }
+    return false;
+  }
+
+  let activeAutofillInputMode = 'all';
+  function isRequiredOnlyMode() { return activeAutofillInputMode === 'required'; }
+  function canAutofillControl(el) { return !isRequiredOnlyMode() || isRequiredControl(el); }
+
   function rowLabel(row) {
     if (!row) return '';
     const sample = row.querySelector('input,select,textarea');
@@ -413,7 +469,7 @@
   }
 
   function setNativeValue(el, value) {
-    if (!meaningful(value) || !el) return false;
+    if (!meaningful(value) || !el || !canAutofillControl(el)) return false;
     const v = String(value);
     el.focus?.({ preventScroll: true });
     let proto;
@@ -494,7 +550,7 @@
   }
 
   function setSelectByText(select, desired) {
-    if (!(select instanceof HTMLSelectElement) || !meaningful(desired)) return false;
+    if (!(select instanceof HTMLSelectElement) || !meaningful(desired) || !canAutofillControl(select)) return false;
     const aliasCandidates = optionCandidateNorms(String(desired));
     const candidates = new Set();
     for (const candidate of aliasCandidates) {
@@ -590,7 +646,7 @@
   }
 
   function setChecked(input, checked = true) {
-    if (!(input instanceof HTMLInputElement) || !['checkbox', 'radio'].includes(input.type)) return false;
+    if (!(input instanceof HTMLInputElement) || !['checkbox', 'radio'].includes(input.type) || !canAutofillControl(input)) return false;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
     if (setter) setter.call(input, !!checked);
     else input.checked = !!checked;
@@ -640,7 +696,7 @@
   }
 
   function setChoiceState(el, checked = true) {
-    if (!el) return false;
+    if (!el || !canAutofillControl(el)) return false;
     if (el instanceof HTMLInputElement && ['checkbox', 'radio'].includes(el.type)) return setChecked(el, checked);
 
     const role = norm(el.getAttribute?.('role'));
@@ -657,7 +713,7 @@
   }
 
   function setSelectMultipleByText(select, desiredValues) {
-    if (!(select instanceof HTMLSelectElement) || !select.multiple) return false;
+    if (!(select instanceof HTMLSelectElement) || !select.multiple || !canAutofillControl(select)) return false;
     const wanted = splitChoiceValues(desiredValues);
     if (!wanted.length) return false;
     let matched = 0;
@@ -863,7 +919,11 @@
       const addedHosts = new Set();
       for (const el of candidates) {
         const info = labelInfo(el);
-        if (isConsent(info.combined) || !questionMatches(info.combined, rule)) continue;
+        const directQuestionText = clean([
+          info.rowLabel, info.label, info.radioLabel, info.aria, info.placeholder,
+          info.nameAttr, info.idAttr, info.dataTestId, info.nearText
+        ].filter(Boolean).join(' | '));
+        if (isConsent(info.combined) || !questionMatches(directQuestionText, rule)) continue;
         const host = fieldContainer(el) || el.parentElement;
         if (host && !addedHosts.has(host)) {
           const hostControls = [...host.querySelectorAll(choiceSelector)];
@@ -1015,8 +1075,20 @@
     return {
       // 新しい職歴はデフォルトで先頭へ追加し、既存の職歴1以降を1つずつ後ろへ送ります。
       // append を選ぶと v4.0 までと同じ末尾追加になります。
-      workAddPosition: settings?.workAddPosition === 'append' ? 'append' : 'prepend'
+      workAddPosition: settings?.workAddPosition === 'append' ? 'append' : 'prepend',
+      inputMode: settings?.inputMode === 'required' ? 'required' : 'all'
     };
+  }
+
+  function getInputMode() { return normalizeEditorSettings(getProfileStore().settings).inputMode; }
+  function inputModeLabel(mode = getInputMode()) { return mode === 'required' ? '必須項目のみ' : '入力可能な項目'; }
+  function setInputMode(mode) {
+    const store = getProfileStore();
+    store.settings = normalizeEditorSettings({ ...store.settings, inputMode: mode });
+    saveProfileStore(store);
+    syncPanelInputMode();
+    updateStatus(null);
+    return store.settings.inputMode;
   }
 
   function makeDefaultStore(data = null) {
@@ -1127,7 +1199,7 @@
     for (const el of visibleControls()) {
       const info = labelInfo(el);
       const hostText = clean(info.container?.innerText || info.container?.textContent || info.combined);
-      const required = el.required || el.getAttribute('aria-required') === 'true' || /(^|\s)(required|必須)(\s|$|[*＊])/i.test(hostText) || /[*＊]\s*$/.test(clean(info.label || info.rowLabel));
+      const required = isRequiredControl(el);
       if (!required) continue;
       const host = info.container || el;
       if (seen.has(host)) continue;
@@ -1290,7 +1362,22 @@
     return count;
   }
 
+  function shouldExpandRepeatSection(anchorRegex) {
+    if (!isRequiredOnlyMode()) return true;
+    const anchors = strongControlsMatching(anchorRegex).filter(el =>
+      !(el instanceof HTMLInputElement && ['radio', 'checkbox'].includes(el.type))
+    );
+    return anchors.some(isRequiredControl);
+  }
+
   async function autofill() {
+    const previousMode = activeAutofillInputMode;
+    activeAutofillInputMode = getInputMode();
+    try { return await autofillCore(); }
+    finally { activeAutofillInputMode = previousMode; }
+  }
+
+  async function autofillCore() {
     const profile = getProfile();
     const before = countFilled();
     let attempts = 0;
@@ -1299,9 +1386,9 @@
     const work = (profile.workExperience || []).filter(x => Object.entries(x || {}).some(([k,v]) => k === 'currentlyWorking' ? v === true : meaningful(v)));
     const certs = (profile.certifications || []).filter(x => Object.values(x || {}).some(meaningful));
 
-    await ensureEntryCount(RX.school, /(add\s*(another\s*)?education|学歴.*追加|学歴を追加)/i, education.length);
-    await ensureEntryCount(RX.company, /(add\s*(another\s*)?(work\s*)?(experience|employment(?:\s*history)?|career)|職歴.*追加|職歴を追加|経歴.*追加|勤務歴.*追加)/i, work.length);
-    await ensureEntryCount(RX.qualification, /(add\s*(another\s*)?(licenses?\/?\s*certifications?|certifications?|qualification)|資格.*追加|資格を追加)/i, certs.length);
+    if (shouldExpandRepeatSection(RX.school)) await ensureEntryCount(RX.school, /(add\s*(another\s*)?education|学歴.*追加|学歴を追加)/i, education.length);
+    if (shouldExpandRepeatSection(RX.company)) await ensureEntryCount(RX.company, /(add\s*(another\s*)?(work\s*)?(experience|employment(?:\s*history)?|career)|職歴.*追加|職歴を追加|経歴.*追加|勤務歴.*追加)/i, work.length);
+    if (shouldExpandRepeatSection(RX.qualification)) await ensureEntryCount(RX.qualification, /(add\s*(another\s*)?(licenses?\/?\s*certifications?|certifications?|qualification)|資格.*追加|資格を追加)/i, certs.length);
 
     const b = profile.basic || {};
     // 漢字氏名は日本語ラベルの括弧表記や「必須」が付くケースを専用判定する。
@@ -1436,11 +1523,12 @@
 
   function statusText(report) {
     const profileName = getActiveProfileName();
-    if (!report) return `${SITE.name} / ${profileName}：内容を確認して「入力」を押してください。`;
+    const mode = inputModeLabel();
+    if (!report) return `${SITE.name} / ${profileName}［${mode}］：内容を確認して「入力」を押してください。`;
     if ('scanned' in report) {
-      return `${SITE.name} / ${profileName}：項目 ${report.scanned} 件を確認。未入力の必須候補 ${report.required.length} 件。`;
+      return `${SITE.name} / ${profileName}［${mode}］：項目 ${report.scanned} 件を確認。未入力の必須候補 ${report.required.length} 件。`;
     }
-    return `${SITE.name} / ${profileName}：入力 ${report.filled} 件、独自回答 ${report.customCount} 件。未入力の必須候補 ${report.required.length} 件。`;
+    return `${SITE.name} / ${profileName}［${mode}］：入力 ${report.filled} 件、独自回答 ${report.customCount} 件。未入力の必須候補 ${report.required.length} 件。`;
   }
 
   function updateStatus(report) {
@@ -1835,6 +1923,7 @@
         <div class="profile-manager">
           <label><span>編集するプロフィール</span><select data-act="profile-select"></select></label>
           <label class="profile-name"><span>プロフィール名</span><input data-act="profile-name" maxlength="60"></label>
+          <label class="input-mode-setting"><span>入力対象（全プロフィール共通）</span><select data-act="input-mode-setting"><option value="all">入力可能な項目</option><option value="required">必須項目のみ</option></select></label>
           <div class="profile-actions">
             <button type="button" data-act="new-profile">新規</button>
             <button type="button" data-act="duplicate-profile">複製</button>
@@ -1853,6 +1942,7 @@
 
     const select = modal.querySelector('[data-act="profile-select"]');
     const nameInput = modal.querySelector('[data-act="profile-name"]');
+    const inputModeSelect = modal.querySelector('[data-act="input-mode-setting"]');
     const tabs = modal.querySelector('.editor-tabs');
     const formHost = modal.querySelector('.editor-form');
     const msg = modal.querySelector('.hrmos-af-editor-msg');
@@ -1896,6 +1986,7 @@
       for (const control of formHost.querySelectorAll('[data-array-csv-path]')) {
         deepSet(record.data, control.dataset.arrayCsvPath, control.value.split(/[,、\n]/).map(clean).filter(Boolean));
       }
+      workingStore.settings = normalizeEditorSettings({ ...workingStore.settings, inputMode: inputModeSelect?.value || 'all' });
       for (const control of formHost.querySelectorAll('[data-store-setting]')) {
         if (!workingStore.settings || typeof workingStore.settings !== 'object') workingStore.settings = normalizeEditorSettings();
         workingStore.settings[control.dataset.storeSetting] = control.value;
@@ -1909,6 +2000,7 @@
     function renderProfileSelector() {
       select.innerHTML = workingStore.profiles.map(p => `<option value="${escapeHtml(p.id)}"${p.id === workingStore.activeId ? ' selected' : ''}>${escapeHtml(p.name)}</option>`).join('');
       nameInput.value = currentRecord()?.name || '';
+      if (inputModeSelect) inputModeSelect.value = normalizeEditorSettings(workingStore.settings).inputMode;
       modal.querySelector('[data-act="delete-profile"]').disabled = workingStore.profiles.length <= 1;
     }
 
@@ -2290,6 +2382,7 @@
         msg.textContent = `「${getActiveProfileName()}」を保存しました。`;
         msg.className = 'hrmos-af-editor-msg ok';
         syncPanelProfileSelect();
+        syncPanelInputMode();
         updateStatus(null);
         renderProfileSelector();
       } catch (e) {
@@ -2327,6 +2420,11 @@
     if (!select) return;
     const store = getProfileStore();
     select.innerHTML = store.profiles.map(p => `<option value="${escapeHtml(p.id)}"${p.id === store.activeId ? ' selected' : ''}>${escapeHtml(p.name)}</option>`).join('');
+  }
+
+  function syncPanelInputMode() {
+    const select = document.querySelector(`#${PANEL_ID} [data-act="input-mode"]`);
+    if (select) select.value = getInputMode();
   }
 
   const PANEL_WINDOW_DEFAULT = { width: 350, left: null, top: null, minimized: false };
@@ -2550,6 +2648,7 @@
       </div>
       <div class="panel-content">
         <label class="panel-profile"><span>使用プロフィール</span><select data-act="active-profile"></select></label>
+        <label class="panel-profile panel-input-mode"><span>入力対象</span><select data-act="input-mode"><option value="all">入力可能な項目</option><option value="required">必須項目のみ</option></select></label>
         <div class="hrmos-af-buttons">
           <button type="button" data-act="fill" class="primary">入力</button>
           <button type="button" data-act="profile">プロフィール設定</button>
@@ -2560,10 +2659,12 @@
       </div>`;
     document.body.appendChild(panel);
     syncPanelProfileSelect();
+    syncPanelInputMode();
     updateStatus(null);
     installPanelWindowBehavior(panel);
     applyPanelWindowPrefs(panel);
     panel.querySelector('[data-act="active-profile"]').addEventListener('change', e => setActiveProfile(e.currentTarget.value));
+    panel.querySelector('[data-act="input-mode"]').addEventListener('change', e => setInputMode(e.currentTarget.value));
     panel.querySelector('[data-act="fill"]').addEventListener('click', async e => {
       const btn = e.currentTarget;
       btn.disabled = true;
@@ -2599,7 +2700,7 @@
       #${MODAL_ID} .hrmos-af-dialog-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px 12px 18px;background:#fff;border-bottom:1px solid #e3e8ef;font-size:16px;flex:0 0 auto}#${MODAL_ID} .hrmos-af-dialog-head .editor-title{display:flex;flex-direction:column;gap:2px;min-width:0}#${MODAL_ID} .hrmos-af-dialog-head small{font-size:11.5px;font-weight:400;color:#687382;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#${MODAL_ID} .editor-window-controls{display:flex;align-items:center;gap:5px;flex:0 0 auto}#${MODAL_ID} .editor-window-controls button{min-width:34px;height:32px;padding:3px 8px;display:grid;place-items:center;font-size:15px;line-height:1}
       #${MODAL_ID}.is-minimized{pointer-events:none}#${MODAL_ID}.is-minimized .hrmos-af-backdrop{display:none}#${MODAL_ID}.is-minimized .hrmos-af-dialog{pointer-events:auto;left:auto!important;top:auto!important;right:16px!important;bottom:16px!important;width:min(430px,calc(100vw - 24px))!important;height:auto!important;min-width:0;min-height:0;max-width:calc(100vw - 24px);max-height:none;resize:none;box-shadow:0 10px 34px rgba(0,0,0,.28)}#${MODAL_ID}.is-minimized .profile-manager,#${MODAL_ID}.is-minimized .editor-tabs,#${MODAL_ID}.is-minimized .hrmos-af-dialog-body,#${MODAL_ID}.is-minimized .hrmos-af-dialog-actions{display:none}#${MODAL_ID}.is-minimized .hrmos-af-dialog-head{border-bottom:0;padding:10px 10px 10px 14px}#${MODAL_ID}.is-minimized .hrmos-af-dialog-head small{display:none}#${MODAL_ID}.is-minimized [data-act="maximize"]{display:none}
       #${MODAL_ID} .hrmos-af-dialog.is-maximized{resize:none;border-radius:10px}
-      #${MODAL_ID} .profile-manager{display:grid;grid-template-columns:minmax(180px,1fr) minmax(180px,1fr) auto;gap:10px;align-items:end;padding:12px 18px;background:#fff;border-bottom:1px solid #e3e8ef}#${MODAL_ID} .profile-manager label{display:grid;gap:4px}#${MODAL_ID} .profile-manager label>span{font-size:11.5px;color:#5e6977;font-weight:600}#${MODAL_ID} .profile-manager input,#${MODAL_ID} .profile-manager select{box-sizing:border-box;width:100%;border:1px solid #c8d0dc;border-radius:7px;padding:8px;background:#fff;color:#202631;font:inherit}#${MODAL_ID} .profile-actions{display:flex;gap:6px}
+      #${MODAL_ID} .profile-manager{display:grid;grid-template-columns:minmax(180px,1fr) minmax(180px,1fr) minmax(160px,.8fr) auto;gap:10px;align-items:end;padding:12px 18px;background:#fff;border-bottom:1px solid #e3e8ef}#${MODAL_ID} .profile-manager label{display:grid;gap:4px}#${MODAL_ID} .profile-manager label>span{font-size:11.5px;color:#5e6977;font-weight:600}#${MODAL_ID} .profile-manager input,#${MODAL_ID} .profile-manager select{box-sizing:border-box;width:100%;border:1px solid #c8d0dc;border-radius:7px;padding:8px;background:#fff;color:#202631;font:inherit}#${MODAL_ID} .profile-actions{display:flex;gap:6px}
       #${MODAL_ID} .editor-tabs{display:flex;gap:5px;overflow-x:auto;padding:9px 18px;background:#fff;border-bottom:1px solid #e3e8ef;overscroll-behavior-x:contain}#${MODAL_ID} .editor-tabs button{white-space:nowrap;border-color:transparent;background:transparent;padding:7px 9px}#${MODAL_ID} .editor-tabs button.active{background:#eaf2ff;border-color:#a9c7f5;color:#0f5fca;font-weight:700}
       #${MODAL_ID} .hrmos-af-dialog-body{flex:1;min-height:0;overflow:auto;padding:16px 18px;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}#${MODAL_ID} .editor-form{max-width:900px;margin:0 auto;display:grid;gap:12px}
       #${MODAL_ID} .editor-help{padding:9px 11px;border:1px solid #cddcf4;background:#f4f8ff;border-radius:8px;color:#42536a}#${MODAL_ID} .work-add-help{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}#${MODAL_ID} .work-add-position{display:flex;align-items:center;gap:8px;font-weight:600}#${MODAL_ID} .work-add-position select{min-width:250px;max-width:100%;border:1px solid #b9c9df;border-radius:7px;padding:7px 9px;background:#fff;color:#202631;font:inherit}#${MODAL_ID} .editor-empty{padding:24px;text-align:center;color:#6b7685;border:1px dashed #c8d0dc;border-radius:9px;background:#fff}
