@@ -10,79 +10,51 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect live HRMOS repeat controls
+      - name: Test current public UserScript on live HRMOS page
         shell: bash
         run: |
           python -m pip install --quiet selenium
           cat > /tmp/audit.py <<'PY'
-          import json, time
+          import json, time, pathlib
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
 
           URL='https://hrmos.co/pages/mun/jobs/02_03/apply'
-          opt=Options()
-          opt.add_argument('--headless=new')
-          opt.add_argument('--no-sandbox')
-          opt.add_argument('--disable-dev-shm-usage')
-          opt.add_argument('--window-size=1440,2200')
-          opt.add_argument('--lang=ja-JP')
-          opt.add_experimental_option('prefs', {'intl.accept_languages':'ja-JP,ja,en-US,en'})
+          works=[]
+          for i in range(4):
+              works.append({
+                  'companyName':f'TEST COMPANY {i+1}', 'departmentTitle':'TEST DEPT', 'occupation':'TEST ROLE',
+                  'employmentType':'正社員','startYear':str(2023+i%3),'startMonth':'1','endYear':'2026','endMonth':'1',
+                  'currentlyWorking':False,'responsibilities':f'TEST DUTIES {i+1}'
+              })
+          store={'version':4,'activeId':'test','settings':{'workAddPosition':'prepend'},'profiles':[{'id':'test','name':'TEST','data':{'workExperience':works}}]}
+          opt=Options(); opt.add_argument('--headless=new'); opt.add_argument('--no-sandbox'); opt.add_argument('--disable-dev-shm-usage'); opt.add_argument('--window-size=1440,2200'); opt.add_argument('--lang=ja-JP'); opt.add_experimental_option('prefs',{'intl.accept_languages':'ja-JP,ja,en-US,en'})
           d=webdriver.Chrome(options=opt)
           try:
-              d.get(URL)
+              d.get(URL); time.sleep(4)
+              before=d.execute_script("return [...document.querySelectorAll('input')].filter(e=>{let p=e.parentElement;for(let i=0;p&&i<5;i++,p=p.parentElement){if((p.innerText||'').replace(/\\s+/g,' ').trim().startsWith('会社名'))return true}return false}).length")
+              print('COMPANY_FIELDS_BEFORE',before)
+              store_json=json.dumps(json.dumps(store,ensure_ascii=False))
+              d.execute_script(f"window.__gmStore={store_json}; window.GM_getValue=(k,d)=>k==='job-application-autofill-public-profiles-v1'?window.__gmStore:d; window.GM_setValue=(k,v)=>{{window.__gmStore=v;}}; window.GM_registerMenuCommand=()=>{{}}; window.GM_addStyle=(css)=>{{const s=document.createElement('style');s.textContent=css;document.head.appendChild(s);return s;}};")
+              script=pathlib.Path('job-application-autofill.user.js').read_text(encoding='utf-8')
+              d.execute_script(script)
+              time.sleep(1)
+              panel=d.find_element('css selector','#job-autofill-panel')
+              fill=panel.find_element('css selector','[data-act="fill"]')
+              fill.click()
               time.sleep(4)
-              print('URL', d.current_url)
-              print('TITLE', d.title)
-              controls=d.execute_script(r'''
-                const sel='button,a,input[type="button"],input[type="submit"],[role="button"],[tabindex="0"]';
-                return [...document.querySelectorAll(sel)].map(e=>{
-                  const text=(e.innerText||e.textContent||e.value||e.getAttribute('aria-label')||e.getAttribute('title')||'').replace(/\s+/g,' ').trim();
-                  return {tag:e.tagName,type:e.type||'',role:e.getAttribute('role'),text:text.slice(0,240),cls:String(e.className||'').slice(0,220),outer:e.outerHTML.slice(0,1400)};
-                }).filter(x=>x.text);
-              ''')
-              print('=== CLICKABLE CONTROLS ===')
-              print(json.dumps(controls,ensure_ascii=False,indent=2))
-              fields=d.execute_script(r'''
-                return [...document.querySelectorAll('input,select,textarea')].filter(e=>e.type!=='hidden').map(e=>{
-                  let txt='';
+              data=d.execute_script(r'''
+                const candidates=[...document.querySelectorAll('input')].filter(e=>{
                   for(let p=e.parentElement,depth=0;p&&depth<6;p=p.parentElement,depth++){
                     const t=(p.innerText||p.textContent||'').replace(/\s+/g,' ').trim();
-                    if(t && t.length<260){txt=t;break;}
+                    if(/^会社名(?:\s+必須)?$/.test(t))return true;
+                    if(t.length>80)break;
                   }
-                  return {tag:e.tagName,type:e.type||'',name:e.name||'',placeholder:e.placeholder||'',aria:e.getAttribute('aria-label')||'',near:txt.slice(0,240),outer:e.outerHTML.slice(0,800)};
+                  return false;
                 });
+                return {count:candidates.length, values:candidates.map(e=>e.value), addButtons:[...document.querySelectorAll('button[hrm-append-button]')].map(b=>(b.innerText||b.textContent||'').replace(/\s+/g,' ').trim()), status:document.querySelector('#job-autofill-panel .hrmos-af-status')?.textContent||''};
               ''')
-              print('=== FIELDS ===')
-              print(json.dumps(fields,ensure_ascii=False,indent=2))
-              # Click the strongest work-experience add candidate in either locale.
-              clicked=d.execute_script(r'''
-                const rx=/(職歴\s*を?\s*追加|職歴.*追加|add\s+(another\s+)?(work\s+)?(experience|employment|career)|add\s+employment\s+history)/i;
-                const els=[...document.querySelectorAll('button,a,input[type="button"],input[type="submit"],[role="button"],[tabindex="0"],div,span')];
-                const cand=[];
-                for(const e of els){
-                  const t=(e.innerText||e.textContent||e.value||e.getAttribute('aria-label')||e.getAttribute('title')||'').replace(/\s+/g,' ').trim();
-                  if(!t || !rx.test(t) || t.length>120) continue;
-                  const tag=e.tagName.toLowerCase(), role=e.getAttribute('role'); let s=0;
-                  if(tag==='button')s+=100;if(tag==='input')s+=95;if(role==='button')s+=90;if(tag==='a')s+=80;if(e.tabIndex>=0)s+=25;if(getComputedStyle(e).cursor==='pointer')s+=15;
-                  s-=Math.max(0,t.length-16);
-                  cand.push({e,s,t});
-                }
-                cand.sort((a,b)=>b.s-a.s);
-                if(!cand.length)return null;
-                const x=cand[0], before=document.querySelectorAll('input,select,textarea').length;
-                x.e.click();
-                return {text:x.t,score:x.s,tag:x.e.tagName,before,outer:x.e.outerHTML.slice(0,1800)};
-              ''')
-              print('=== CLICKED WORK ADD ===')
-              print(json.dumps(clicked,ensure_ascii=False,indent=2))
-              time.sleep(2)
-              after=d.execute_script(r'''
-                const buttons=[...document.querySelectorAll('button,a,input[type="button"],[role="button"]')].map(e=>(e.innerText||e.textContent||e.value||e.getAttribute('aria-label')||'').replace(/\s+/g,' ').trim()).filter(Boolean);
-                const fields=[...document.querySelectorAll('input,select,textarea')].filter(e=>e.type!=='hidden');
-                return {fieldCount:fields.length, addTexts:buttons.filter(t=>/(職歴|work|employment|career)/i.test(t)).slice(0,30), tailFields:fields.slice(-16).map(e=>({tag:e.tagName,type:e.type||'',name:e.name||'',placeholder:e.placeholder||'',outer:e.outerHTML.slice(0,700)}))};
-              ''')
-              print('=== AFTER CLICK ===')
-              print(json.dumps(after,ensure_ascii=False,indent=2))
+              print('RESULT',json.dumps(data,ensure_ascii=False))
           finally:
               d.quit()
           PY
