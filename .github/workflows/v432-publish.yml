@@ -1,0 +1,122 @@
+name: v4.3.2 required-only validation
+on:
+  push:
+    paths:
+      - '.github/workflows/v432-publish.yml'
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch UserScript to v4.3.2
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('job-application-autofill.user.js')
+          s=p.read_text(encoding='utf-8')
+          s=s.replace('// @version      4.3.1','// @version      4.3.2',1)
+          s=s.replace('HRMOS等の「職歴を追加」型の動的追加にも対応し、プルダウン・ラジオ・チェックボックス・複数選択も補助します。','HRMOS等の「職歴を追加」型の動的追加に対応し、「必須項目のみ入力」も選択可能。プルダウン・ラジオ・チェックボックス・複数選択も補助します。',1)
+          marker='''  function rowLabel(row) {\n'''
+          insert='''  const REQUIRED_TOKEN_RX = /(?:^|[\\s:：※*＊・\\-／/（(])(?:必須|required|mandatory)(?:$|[\\s:：※*＊・\\-／/）)])/i;\n\n  function hasRequiredMarkerText(text) {\n    const t = clean(text);\n    return !!t && REQUIRED_TOKEN_RX.test(t);\n  }\n\n  function isRequiredControl(el) {\n    if (!el) return false;\n    try {\n      if (el.required === true) return true;\n      if (el.getAttribute?.('required') !== null) return true;\n      if (el.getAttribute?.('aria-required') === 'true') return true;\n      if (/^(true|required|1)$/i.test(clean(el.getAttribute?.('data-required')))) return true;\n      const ownClass = typeof el.className === 'string' ? el.className : '';\n      if (/(^|[\\s_-])(?:required|mandatory|is-required|field-required)(?=$|[\\s_-])/i.test(ownClass)) return true;\n    } catch (_) {}\n    const info = labelInfo(el);\n    for (const text of [info.rowLabel, info.label, info.aria, info.radioLabel]) {\n      if (hasRequiredMarkerText(text)) return true;\n    }\n    const container = info.container;\n    if (container) {\n      try {\n        if (container.getAttribute?.('aria-required') === 'true' || /^(true|required|1)$/i.test(clean(container.getAttribute?.('data-required')))) return true;\n        const cls = typeof container.className === 'string' ? container.className : '';\n        if (/(^|[\\s_-])(?:required|mandatory|is-required|field-required)(?=$|[\\s_-])/i.test(cls)) return true;\n        const marker = container.querySelector?.('[aria-required="true"],[data-required="true"],[data-required="required"],.required,.is-required,.field-required,[class*="mandatory"]');\n        if (marker && (marker === el || hasRequiredMarkerText(marker.innerText || marker.textContent || marker.getAttribute?.('aria-label') || '') || /required|mandatory/i.test(String(marker.className || '')))) return true;\n        const t = clean(container.innerText || container.textContent);\n        if (t && t.length <= 260 && hasRequiredMarkerText(t)) return true;\n      } catch (_) {}\n    }\n    for (let node = el.parentElement, depth = 0; node && depth < 6; node = node.parentElement, depth++) {\n      if (node === document.body || node === document.documentElement) break;\n      const text = clean(node.innerText || node.textContent);\n      if (!text || text.length > 340) continue;\n      let controls = [];\n      try { controls = [...node.querySelectorAll('input,select,textarea,[role="radio"],[role="checkbox"],[role="switch"],[role="option"]')]; } catch (_) {}\n      const nativeChoices = controls.length > 1 && controls.every(c =>\n        (c instanceof HTMLInputElement && ['radio', 'checkbox'].includes(c.type))\n        || ['radio', 'checkbox', 'switch', 'option'].includes(norm(c.getAttribute?.('role')))\n      );\n      const dateSelectGroup = controls.length > 1 && controls.length <= 4 && controls.every(c => c instanceof HTMLSelectElement && !!datePartKind(c));\n      const cohesive = controls.length === 1 || nativeChoices || dateSelectGroup;\n      if (!cohesive) continue;\n      if (node.getAttribute?.('aria-required') === 'true' || /^(true|required|1)$/i.test(clean(node.getAttribute?.('data-required')))) return true;\n      if (hasRequiredMarkerText(text)) return true;\n    }\n    return false;\n  }\n\n  let activeAutofillInputMode = 'all';\n  function isRequiredOnlyMode() { return activeAutofillInputMode === 'required'; }\n  function canAutofillControl(el) { return !isRequiredOnlyMode() || isRequiredControl(el); }\n\n  function rowLabel(row) {\n'''
+          assert marker in s
+          s=s.replace(marker,insert,1)
+          s=s.replace("  function setNativeValue(el, value) {\n    if (!meaningful(value) || !el) return false;","  function setNativeValue(el, value) {\n    if (!meaningful(value) || !el || !canAutofillControl(el)) return false;",1)
+          s=s.replace("  function setSelectByText(select, desired) {\n    if (!(select instanceof HTMLSelectElement) || !meaningful(desired)) return false;","  function setSelectByText(select, desired) {\n    if (!(select instanceof HTMLSelectElement) || !meaningful(desired) || !canAutofillControl(select)) return false;",1)
+          s=s.replace("  function setChecked(input, checked = true) {\n    if (!(input instanceof HTMLInputElement) || !['checkbox', 'radio'].includes(input.type)) return false;","  function setChecked(input, checked = true) {\n    if (!(input instanceof HTMLInputElement) || !['checkbox', 'radio'].includes(input.type) || !canAutofillControl(input)) return false;",1)
+          s=s.replace("  function setChoiceState(el, checked = true) {\n    if (!el) return false;","  function setChoiceState(el, checked = true) {\n    if (!el || !canAutofillControl(el)) return false;",1)
+          s=s.replace("  function setSelectMultipleByText(select, desiredValues) {\n    if (!(select instanceof HTMLSelectElement) || !select.multiple) return false;","  function setSelectMultipleByText(select, desiredValues) {\n    if (!(select instanceof HTMLSelectElement) || !select.multiple || !canAutofillControl(select)) return false;",1)
+          old='''  function normalizeEditorSettings(settings = {}) {\n    return {\n      // 新しい職歴はデフォルトで先頭へ追加し、既存の職歴1以降を1つずつ後ろへ送ります。\n      // append を選ぶと v4.0 までと同じ末尾追加になります。\n      workAddPosition: settings?.workAddPosition === 'append' ? 'append' : 'prepend'\n    };\n  }\n'''
+          new='''  function normalizeEditorSettings(settings = {}) {\n    return {\n      // 新しい職歴はデフォルトで先頭へ追加し、既存の職歴1以降を1つずつ後ろへ送ります。\n      // append を選ぶと v4.0 までと同じ末尾追加になります。\n      workAddPosition: settings?.workAddPosition === 'append' ? 'append' : 'prepend',\n      inputMode: settings?.inputMode === 'required' ? 'required' : 'all'\n    };\n  }\n\n  function getInputMode() { return normalizeEditorSettings(getProfileStore().settings).inputMode; }\n  function inputModeLabel(mode = getInputMode()) { return mode === 'required' ? '必須項目のみ' : '入力可能な項目'; }\n  function setInputMode(mode) {\n    const store = getProfileStore();\n    store.settings = normalizeEditorSettings({ ...store.settings, inputMode: mode });\n    saveProfileStore(store);\n    syncPanelInputMode();\n    updateStatus(null);\n    return store.settings.inputMode;\n  }\n'''
+          assert old in s
+          s=s.replace(old,new,1)
+          s=s.replace("      const required = el.required || el.getAttribute('aria-required') === 'true' || /(^|\\s)(required|必須)(\\s|$|[*＊])/i.test(hostText) || /[*＊]\\s*$/.test(clean(info.label || info.rowLabel));\n      if (!required) continue;","      const required = isRequiredControl(el);\n      if (!required) continue;",1)
+          old='''        const info = labelInfo(el);\n        if (isConsent(info.combined) || !questionMatches(info.combined, rule)) continue;\n'''
+          new='''        const info = labelInfo(el);\n        const directQuestionText = clean([\n          info.rowLabel, info.label, info.radioLabel, info.aria, info.placeholder,\n          info.nameAttr, info.idAttr, info.dataTestId, info.nearText\n        ].filter(Boolean).join(' | '));\n        if (isConsent(info.combined) || !questionMatches(directQuestionText, rule)) continue;\n'''
+          assert old in s
+          s=s.replace(old,new,1)
+          old='''  async function autofill() {\n    const profile = getProfile();\n'''
+          new='''  function shouldExpandRepeatSection(anchorRegex) {\n    if (!isRequiredOnlyMode()) return true;\n    const anchors = strongControlsMatching(anchorRegex).filter(el =>\n      !(el instanceof HTMLInputElement && ['radio', 'checkbox'].includes(el.type))\n    );\n    return anchors.some(isRequiredControl);\n  }\n\n  async function autofill() {\n    const previousMode = activeAutofillInputMode;\n    activeAutofillInputMode = getInputMode();\n    try { return await autofillCore(); }\n    finally { activeAutofillInputMode = previousMode; }\n  }\n\n  async function autofillCore() {\n    const profile = getProfile();\n'''
+          assert old in s
+          s=s.replace(old,new,1)
+          old='''    await ensureEntryCount(RX.school, /(add\\s*(another\\s*)?education|学歴.*追加|学歴を追加)/i, education.length);\n    await ensureEntryCount(RX.company, /(add\\s*(another\\s*)?(work\\s*)?(experience|employment(?:\\s*history)?|career)|職歴.*追加|職歴を追加|経歴.*追加|勤務歴.*追加)/i, work.length);\n    await ensureEntryCount(RX.qualification, /(add\\s*(another\\s*)?(licenses?\\/?\\s*certifications?|certifications?|qualification)|資格.*追加|資格を追加)/i, certs.length);\n'''
+          new='''    if (shouldExpandRepeatSection(RX.school)) await ensureEntryCount(RX.school, /(add\\s*(another\\s*)?education|学歴.*追加|学歴を追加)/i, education.length);\n    if (shouldExpandRepeatSection(RX.company)) await ensureEntryCount(RX.company, /(add\\s*(another\\s*)?(work\\s*)?(experience|employment(?:\\s*history)?|career)|職歴.*追加|職歴を追加|経歴.*追加|勤務歴.*追加)/i, work.length);\n    if (shouldExpandRepeatSection(RX.qualification)) await ensureEntryCount(RX.qualification, /(add\\s*(another\\s*)?(licenses?\\/?\\s*certifications?|certifications?|qualification)|資格.*追加|資格を追加)/i, certs.length);\n'''
+          assert old in s
+          s=s.replace(old,new,1)
+          s=s.replace("    if (!report) return `${SITE.name} / ${profileName}：内容を確認して「入力」を押してください。`;","    const mode = inputModeLabel();\n    if (!report) return `${SITE.name} / ${profileName}［${mode}］：内容を確認して「入力」を押してください。`;",1)
+          s=s.replace("      return `${SITE.name} / ${profileName}：項目 ${report.scanned} 件を確認。未入力の必須候補 ${report.required.length} 件。`;","      return `${SITE.name} / ${profileName}［${mode}］：項目 ${report.scanned} 件を確認。未入力の必須候補 ${report.required.length} 件。`;",1)
+          s=s.replace("    return `${SITE.name} / ${profileName}：入力 ${report.filled} 件、独自回答 ${report.customCount} 件。未入力の必須候補 ${report.required.length} 件。`;","    return `${SITE.name} / ${profileName}［${mode}］：入力 ${report.filled} 件、独自回答 ${report.customCount} 件。未入力の必須候補 ${report.required.length} 件。`;",1)
+          s=s.replace('''          <label class="profile-name"><span>プロフィール名</span><input data-act="profile-name" maxlength="60"></label>\n          <div class="profile-actions">\n''','''          <label class="profile-name"><span>プロフィール名</span><input data-act="profile-name" maxlength="60"></label>\n          <label class="input-mode-setting"><span>入力対象（全プロフィール共通）</span><select data-act="input-mode-setting"><option value="all">入力可能な項目</option><option value="required">必須項目のみ</option></select></label>\n          <div class="profile-actions">\n''',1)
+          s=s.replace("    const nameInput = modal.querySelector('[data-act=\"profile-name\"]');","    const nameInput = modal.querySelector('[data-act=\"profile-name\"]');\n    const inputModeSelect = modal.querySelector('[data-act=\"input-mode-setting\"]');",1)
+          s=s.replace("      for (const control of formHost.querySelectorAll('[data-store-setting]')) {","      workingStore.settings = normalizeEditorSettings({ ...workingStore.settings, inputMode: inputModeSelect?.value || 'all' });\n      for (const control of formHost.querySelectorAll('[data-store-setting]')) {",1)
+          s=s.replace("      nameInput.value = currentRecord()?.name || '';\n      modal.querySelector('[data-act=\"delete-profile\"]').disabled = workingStore.profiles.length <= 1;","      nameInput.value = currentRecord()?.name || '';\n      if (inputModeSelect) inputModeSelect.value = normalizeEditorSettings(workingStore.settings).inputMode;\n      modal.querySelector('[data-act=\"delete-profile\"]').disabled = workingStore.profiles.length <= 1;",1)
+          s=s.replace("        syncPanelProfileSelect();\n        updateStatus(null);","        syncPanelProfileSelect();\n        syncPanelInputMode();\n        updateStatus(null);",1)
+          old='''  function syncPanelProfileSelect() {\n    const select = document.querySelector(`#${PANEL_ID} [data-act="active-profile"]`);\n    if (!select) return;\n    const store = getProfileStore();\n    select.innerHTML = store.profiles.map(p => `<option value="${escapeHtml(p.id)}"${p.id === store.activeId ? ' selected' : ''}>${escapeHtml(p.name)}</option>`).join('');\n  }\n'''
+          new=old+'''\n  function syncPanelInputMode() {\n    const select = document.querySelector(`#${PANEL_ID} [data-act="input-mode"]`);\n    if (select) select.value = getInputMode();\n  }\n'''
+          assert old in s
+          s=s.replace(old,new,1)
+          s=s.replace('''        <label class="panel-profile"><span>使用プロフィール</span><select data-act="active-profile"></select></label>\n        <div class="hrmos-af-buttons">\n''','''        <label class="panel-profile"><span>使用プロフィール</span><select data-act="active-profile"></select></label>\n        <label class="panel-profile panel-input-mode"><span>入力対象</span><select data-act="input-mode"><option value="all">入力可能な項目</option><option value="required">必須項目のみ</option></select></label>\n        <div class="hrmos-af-buttons">\n''',1)
+          s=s.replace("    document.body.appendChild(panel);\n    syncPanelProfileSelect();\n    updateStatus(null);","    document.body.appendChild(panel);\n    syncPanelProfileSelect();\n    syncPanelInputMode();\n    updateStatus(null);",1)
+          s=s.replace("    panel.querySelector('[data-act=\"active-profile\"]').addEventListener('change', e => setActiveProfile(e.currentTarget.value));","    panel.querySelector('[data-act=\"active-profile\"]').addEventListener('change', e => setActiveProfile(e.currentTarget.value));\n    panel.querySelector('[data-act=\"input-mode\"]').addEventListener('change', e => setInputMode(e.currentTarget.value));",1)
+          s=s.replace('grid-template-columns:minmax(180px,1fr) minmax(180px,1fr) auto;gap:10px;','grid-template-columns:minmax(180px,1fr) minmax(180px,1fr) minmax(160px,.8fr) auto;gap:10px;',1)
+          p.write_text(s,encoding='utf-8')
+          PY
+          node --check job-application-autofill.user.js
+          grep -q '@version      4.3.2' job-application-autofill.user.js
+      - name: Validate required-only mode on live HRMOS
+        shell: bash
+        run: |
+          python -m pip install --quiet selenium
+          cat > /tmp/live_test.py <<'PY'
+          import json,time,pathlib
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+          URL='https://hrmos.co/pages/mun/jobs/02_03/apply'
+          works=[{'companyName':f'TEST COMPANY {i}','departmentTitle':f'OPTIONAL DEPT {i}','occupation':f'OPTIONAL ROLE {i}'} for i in range(1,4)]
+          store={'version':4,'activeId':'test','settings':{'workAddPosition':'prepend','inputMode':'required'},'profiles':[{'id':'test','name':'TEST','data':{'workExperience':works,'certifications':[{'name':'OPTIONAL CERT 1'},{'name':'OPTIONAL CERT 2'}]}}]}
+          opt=Options();opt.add_argument('--headless=new');opt.add_argument('--no-sandbox');opt.add_argument('--disable-dev-shm-usage');opt.add_argument('--window-size=1440,2200');opt.add_argument('--lang=ja-JP');opt.add_experimental_option('prefs',{'intl.accept_languages':'ja-JP,ja,en-US,en'})
+          d=webdriver.Chrome(options=opt)
+          try:
+            d.get(URL);time.sleep(4)
+            store_s=json.dumps(json.dumps(store,ensure_ascii=False))
+            d.execute_script(f"window.__store={store_s};window.GM_getValue=(k,d)=>k==='job-application-autofill-public-profiles-v1'?window.__store:d;window.GM_setValue=(k,v)=>{{if(k==='job-application-autofill-public-profiles-v1')window.__store=v;}};window.GM_registerMenuCommand=()=>{{}};window.GM_addStyle=(css)=>{{const s=document.createElement('style');s.textContent=css;document.head.appendChild(s);return s;}};")
+            d.execute_script(pathlib.Path('job-application-autofill.user.js').read_text(encoding='utf-8'));time.sleep(.5)
+            assert d.execute_script("return document.querySelector('#job-autofill-panel [data-act=input-mode]').value")=='required'
+            d.execute_script("document.querySelector('#job-autofill-panel [data-act=fill]').click()")
+            for _ in range(120):
+              if d.execute_script("return !document.querySelector('#job-autofill-panel [data-act=fill]').disabled"):break
+              time.sleep(.1)
+            result=d.execute_script(r'''
+              function fields(label){return [...document.querySelectorAll('input')].filter(e=>{for(let p=e.parentElement,depth=0;p&&depth<6;p=p.parentElement,depth++){const t=(p.innerText||p.textContent||'').replace(/\s+/g,' ').trim();if(t===label||t===label+' 必須')return true;if(t.length>100)break}return false})}
+              return {companies:fields('会社名').map(e=>e.value),departments:fields('部署・役職名').map(e=>e.value),certs:fields('取得資格名').map(e=>e.value),status:document.querySelector('#job-autofill-panel .hrmos-af-status').textContent};
+            ''')
+            print('LIVE_REQUIRED_RESULT',json.dumps(result,ensure_ascii=False))
+            assert result['companies']==['TEST COMPANY 1','TEST COMPANY 2','TEST COMPANY 3'],result
+            assert all(v=='' for v in result['departments']),result
+            assert all(v=='' for v in result['certs']),result
+          finally:
+            d.quit()
+          PY
+          python /tmp/live_test.py
+      - name: Update README and publish
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('README.md');s=p.read_text(encoding='utf-8')
+          if '入力対象を「入力可能な項目（従来挙動）」／「必須項目のみ」から選択' not in s:
+            s=s.replace('- 複数プロフィールの作成・複製・切替・削除\n','- 複数プロフィールの作成・複製・切替・削除\n- 入力対象を「入力可能な項目（従来挙動）」／「必須項目のみ」から選択\n',1)
+          section='''\n## 必須項目のみ入力\n\n右下の「求人応募 入力支援」にある「入力対象」から「入力可能な項目」と「必須項目のみ」を選択できます。初期設定は従来どおり「入力可能な項目」です。\n\n必須判定では `required`、`aria-required="true"`、`data-required`、required系class、項目ラベルや近傍表示の「必須」「required」「mandatory」などを参照します。必須のみモードでは任意項目を入力せず、任意の繰り返しセクションも不要に増やしません。設定は全プロフィール共通です。\n\n'''
+          if '## 必須項目のみ入力' not in s:s=s.replace('## プライバシー\n',section+'## プライバシー\n',1)
+          note='''\n## v4.3.2\n\n- 「必須項目のみ入力」モードを追加しました。デフォルトは従来どおり「入力可能な項目」です。\n- `required` / `aria-required` / `data-required` / required系class / ラベル・近傍の必須表示を組み合わせて判定します。\n- 必須のみモードでは任意項目への値設定を低レベル入力処理でも抑止します。\n- 職歴・学歴・資格の動的追加も必須判定へ連動します。\n- 企業独自質問のマッチングを局所化し、別質問への誤入力を抑制しました。\n- 実HRMOSページ `hrmos.co/pages/mun/jobs/02_03/apply` で、必須の会社名は3件まで動的追加・入力し、任意の部署・役職名と資格は未入力のままになることを確認しています。応募確認・送信は行っていません。\n'''
+          if '## v4.3.2' not in s:s=s.rstrip()+note+'\n'
+          p.write_text(s,encoding='utf-8')
+          PY
+          git rm .github/workflows/v432-publish.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add job-application-autofill.user.js README.md
+          git commit -m 'feat: add required-only autofill mode'
+          git push
