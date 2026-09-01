@@ -4,8 +4,8 @@
 // @homepageURL  https://github.com/hexahydroc-420/job-application-autofill-userscript
 // @updateURL    https://raw.githubusercontent.com/hexahydroc-420/job-application-autofill-userscript/main/job-application-autofill.user.js
 // @downloadURL  https://raw.githubusercontent.com/hexahydroc-420/job-application-autofill-userscript/main/job-application-autofill.user.js
-// @version      4.3.0
-// @description  複数プロフィールをGUIで管理し、学歴・職歴・資格・企業独自回答をドラッグや上下ボタンで並べ替え可能。プルダウン、ラジオ・チェックボックス・複数選択にも対応します。送信・同意・ファイル添付は自動化しません。
+// @version      4.3.1
+// @description  複数プロフィールをGUIで管理し、学歴・職歴・資格・企業独自回答を並べ替え可能。HRMOS等の「職歴を追加」型の動的追加にも対応し、プルダウン・ラジオ・チェックボックス・複数選択も補助します。送信・同意・ファイル添付は自動化しません。
 // @match        https://hrmos.co/pages/*/jobs/*/apply*
 // @match        https://boards.greenhouse.io/*
 // @match        https://job-boards.greenhouse.io/*
@@ -735,24 +735,103 @@
       if (controlFilter) controls = controls.filter(controlFilter);
       if (controls[0]) return fillControl(controls[0], value);
     }
-    let controls = controlsMatching(regex, scope, { excludeNegative: true });
+    let controls = strongControlsMatching(regex, scope, { excludeNegative: true });
+    if (!controls.length) controls = controlsMatching(regex, scope, { excludeNegative: true });
     if (controlFilter) controls = controls.filter(controlFilter);
     return fillControl(controls[occurrence], value);
   }
 
+  // 繰り返し項目では「セクション全体の文言」に引っ張られると、
+  // 会社名以外の入力欄まで会社名候補として数えてしまう。
+  // 行/ラベル/placeholder/近傍の短い文言だけを使う強判定を別途用意する。
+  function strongControlsMatching(regex, scope = null, options = {}) {
+    const { tag = null, type = null, excludeNegative = true } = options;
+    return visibleControls(scope).filter(el => {
+      if (tag && el.tagName.toLowerCase() !== tag) return false;
+      if (type && !(el instanceof HTMLInputElement && el.type === type)) return false;
+      const info = labelInfo(el);
+      if (excludeNegative && SENSITIVE_NEGATIVE_RX.test(info.combined)) return false;
+      const direct = clean([
+        info.rowLabel, info.label, info.radioLabel, info.aria, info.placeholder,
+        info.nameAttr, info.idAttr, info.dataTestId
+      ].filter(Boolean).join(' | '));
+      if (direct && regex.test(direct)) return true;
+      return !!(info.nearText && info.nearText.length <= 180 && regex.test(info.nearText));
+    });
+  }
+
+  function countEntryAnchors(anchorRegex) {
+    return getRoots().reduce((total, root) => {
+      const rows = rowsMatching(anchorRegex, root);
+      if (rows.length) return total + rows.length;
+      const controls = strongControlsMatching(anchorRegex, root).filter(el =>
+        !(el instanceof HTMLInputElement && ['radio', 'checkbox'].includes(el.type))
+      );
+      return total + controls.length;
+    }, 0);
+  }
+
+  function actionText(el) {
+    return clean(
+      el?.innerText || el?.textContent || el?.value ||
+      el?.getAttribute?.('aria-label') || el?.getAttribute?.('title') || ''
+    );
+  }
+
   function findButton(regex) {
-    return all('button, a, [role="button"]').find(btn => regex.test(clean(btn.innerText || btn.textContent || btn.getAttribute('aria-label')))) || null;
+    const selector = [
+      'button[hrm-append-button]', '[hrm-append-button]',
+      'button', 'input[type="button"]', 'input[type="submit"]',
+      'a', '[role="button"]', '[aria-pressed]', '[tabindex="0"]'
+    ].join(',');
+    const candidates = all(selector).filter(el => {
+      if (el.disabled || el.getAttribute?.('aria-disabled') === 'true') return false;
+      const text = actionText(el);
+      return !!text && text.length <= 180 && regex.test(text);
+    }).map((el, index) => {
+      const tag = el.tagName.toLowerCase();
+      const text = actionText(el);
+      let score = 0;
+      if (el.hasAttribute?.('hrm-append-button')) score += 300;
+      if (tag === 'button') score += 120;
+      if (tag === 'input') score += 105;
+      if (el.getAttribute?.('role') === 'button') score += 95;
+      if (tag === 'a') score += 70;
+      if (el.tabIndex >= 0) score += 20;
+      if (clean(el.getAttribute?.('aria-label'))) score += 10;
+      score -= Math.min(80, Math.max(0, text.length - 24));
+      return { el, score, index };
+    });
+    candidates.sort((a, b) => b.score - a.score || a.index - b.index);
+    return candidates[0]?.el || null;
+  }
+
+  async function waitForEntryGrowth(anchorRegex, before, timeoutMs = 1800) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      await sleep(80);
+      const current = countEntryAnchors(anchorRegex);
+      if (current > before) return current;
+    }
+    return countEntryAnchors(anchorRegex);
   }
 
   async function ensureEntryCount(anchorRegex, buttonRegex, count) {
     if (!count || count < 1) return;
-    for (let guard = 0; guard < Math.min(12, count + 3); guard++) {
-      const current = getRoots().reduce((n, root) => n + Math.max(rowsMatching(anchorRegex, root).length, controlsMatching(anchorRegex, root).filter(el => !(el instanceof HTMLInputElement && ['radio','checkbox'].includes(el.type))).length), 0);
+    for (let guard = 0; guard < Math.min(16, count + 5); guard++) {
+      const current = countEntryAnchors(anchorRegex);
       if (current >= count) break;
       const button = findButton(buttonRegex);
       if (!button) break;
-      button.click();
-      await sleep(180);
+      try {
+        button.click();
+      } catch (_) {
+        try {
+          button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+        } catch (_) {}
+      }
+      const grown = await waitForEntryGrowth(anchorRegex, current);
+      if (grown <= current) break;
     }
   }
 
@@ -1221,7 +1300,7 @@
     const certs = (profile.certifications || []).filter(x => Object.values(x || {}).some(meaningful));
 
     await ensureEntryCount(RX.school, /(add\s*(another\s*)?education|学歴.*追加|学歴を追加)/i, education.length);
-    await ensureEntryCount(RX.company, /(add\s*(another\s*)?(work\s*)?(experience|employment)|職歴.*追加|職歴を追加)/i, work.length);
+    await ensureEntryCount(RX.company, /(add\s*(another\s*)?(work\s*)?(experience|employment(?:\s*history)?|career)|職歴.*追加|職歴を追加|経歴.*追加|勤務歴.*追加)/i, work.length);
     await ensureEntryCount(RX.qualification, /(add\s*(another\s*)?(licenses?\/?\s*certifications?|certifications?|qualification)|資格.*追加|資格を追加)/i, certs.length);
 
     const b = profile.basic || {};
